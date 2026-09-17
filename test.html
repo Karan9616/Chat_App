@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Chat Test Client</title>
+  <style>
+    body { font-family: sans-serif; max-width: 640px; margin: 20px auto; }
+    section { border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; border-radius: 6px; }
+    input, button { padding: 6px; font-size: 14px; }
+    input { width: 60%; }
+    #log { background: #111; color: #eee; padding: 10px; height: 260px; overflow-y: auto; white-space: pre-wrap; border-radius: 6px; }
+    .row { display: flex; gap: 6px; margin-top: 6px; }
+    h3 { margin: 0 0 6px 0; font-size: 14px; }
+    .status { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>Chat Test Client</h2>
+  <div>Status: <span id="status" class="status">disconnected</span></div>
+
+  <section>
+    <h3>Broadcast (everyone on server)</h3>
+    <div class="row">
+      <input id="bcastInput" placeholder="message to broadcast" />
+      <button id="bcastBtn">send</button>
+    </div>
+  </section>
+
+  <section>
+    <h3>Rooms</h3>
+    <div class="row">
+      <input id="roomIdInput" placeholder="room id (e.g. lobby)" />
+      <button id="joinBtn">join</button>
+      <button id="leaveBtn">leave</button>
+    </div>
+    <div class="row">
+      <input id="roomMsgInput" placeholder="message to room" />
+      <button id="roomMsgBtn">send to room</button>
+    </div>
+  </section>
+
+  <section>
+    <h3>Log</h3>
+    <div id="log"></div>
+  </section>
+
+  <script>
+    const ws = new WebSocket("ws://localhost:3223/");
+    const statusEl = document.getElementById("status");
+    const logEl = document.getElementById("log");
+
+    function log(line) {
+      logEl.textContent += line + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    ws.onopen  = () => { statusEl.textContent = "connected"; log("[open] connected"); };
+    ws.onclose = () => { statusEl.textContent = "closed";    log("[close]"); };
+    ws.onerror = (e) => log("[error] " + (e.message || "socket error"));
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        // server field is `senderID` (not sender_id)
+        const from = msg.senderID || "?";
+        const room = msg.roomId ? " room=" + msg.roomId : "";
+        log(`[${msg.type}] from=${from}${room} data=${JSON.stringify(msg.data)}`);
+      } catch (err) {
+        log("[recv-raw] " + e.data);
+      }
+    };
+
+    function send(obj) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        log("[warn] socket not open");
+        return;
+      }
+      ws.send(JSON.stringify(obj));
+      log("[sent] " + JSON.stringify(obj));
+    }
+
+    // --- wire up buttons ---
+    const bcastInput   = document.getElementById("bcastInput");
+    const roomIdInput  = document.getElementById("roomIdInput");
+    const roomMsgInput = document.getElementById("roomMsgInput");
+
+    document.getElementById("bcastBtn").onclick = () => {
+      send({ type: "broadcast", data: bcastInput.value });
+      bcastInput.value = "";
+    };
+
+    document.getElementById("joinBtn").onclick = () => {
+      send({ type: "join-room", roomId: roomIdInput.value });
+    };
+
+    document.getElementById("leaveBtn").onclick = () => {
+      send({ type: "leave-room", roomId: roomIdInput.value });
+    };
+
+    document.getElementById("roomMsgBtn").onclick = () => {
+      send({ type: "room-message", roomId: roomIdInput.value, data: roomMsgInput.value });
+      roomMsgInput.value = "";
+    };
+  </script>
+</body>
+</html>
