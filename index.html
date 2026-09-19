@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nebula Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ================= Sidebar ================= -->
+    <aside class="sidebar">
+      <div class="sidebar__brand">
+        <div class="brand__logo">N</div>
+        <div class="brand__meta">
+          <h1>Nebula Chat</h1>
+          <p>Real-time WebSocket rooms</p>
+        </div>
+      </div>
+
+      <div class="identity">
+        <div class="identity__row">
+          <div class="avatar" id="userAvatar">?</div>
+          <div class="identity__info">
+            <div class="identity__label">Your ID</div>
+            <div class="identity__id" id="userId">— not connected —</div>
+          </div>
+        </div>
+        <div class="status-pill" id="statusPill" data-state="connecting">
+          <span class="dot"></span>
+          <span id="statusText">connecting…</span>
+        </div>
+      </div>
+
+      <nav class="channels">
+        <div class="channels__group-title">
+          <span>Channels</span>
+        </div>
+        <ul class="channels__list" id="channelsList">
+          <li class="channel-item is-broadcast is-active" data-channel="__broadcast__">
+            <div class="channel-item__icon">📣</div>
+            <div class="channel-item__name">Broadcast</div>
+          </li>
+        </ul>
+
+        <div class="channels__group-title">
+          <span>Rooms</span>
+          <span id="roomsCount" style="color: var(--text-muted); font-weight: 500;">0</span>
+        </div>
+        <ul class="channels__list" id="roomsList"></ul>
+      </nav>
+
+      <form class="join-room" id="joinForm" autocomplete="off">
+        <input
+          id="joinRoomInput"
+          type="text"
+          placeholder="Join or create a room…"
+          maxlength="40"
+        />
+        <button type="submit" class="btn btn--icon" id="joinBtn" title="Join room" aria-label="Join room">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        </button>
+      </form>
+    </aside>
+
+    <!-- ================= Main Chat ================= -->
+    <main class="chat">
+      <header class="chat__header">
+        <div class="chat__header-icon" id="chatIcon">📣</div>
+        <div class="chat__header-info">
+          <h2 class="chat__header-title" id="chatTitle">Broadcast</h2>
+          <p class="chat__header-subtitle" id="chatSubtitle">Messages here are sent to every connected client</p>
+        </div>
+      </header>
+
+      <section class="messages" id="messages">
+        <div class="messages__empty" id="messagesEmpty">
+          <div class="messages__empty-icon">💬</div>
+          <h3>No messages yet</h3>
+          <p>Start the conversation — messages you send will appear on the right, replies on the left.</p>
+        </div>
+      </section>
+
+      <footer class="composer">
+        <div class="composer__inner">
+          <textarea
+            id="composerInput"
+            class="composer__input"
+            rows="1"
+            placeholder="Type a message…"
+          ></textarea>
+          <button id="sendBtn" class="composer__send" title="Send" aria-label="Send message" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+        <div class="composer__hint">
+          Press <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for new line
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Toasts -->
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script>
+    // ============================================================
+    // Nebula Chat — client
+    // Wire protocol matches main.go:
+    //   send:    { type, roomId, data }
+    //   recv:    { type, senderID, roomId, data }
+    //   types:   broadcast | join-room | leave-room | room-message
+    // ============================================================
+
+    const WS_URL = `ws://${location.hostname || "localhost"}:3223/`;
+    const BROADCAST = "__broadcast__";
+
+    // --- state --------------------------------------------------
+    const state = {
+      ws: null,
+      myId: null,
+      activeChannel: BROADCAST,   // BROADCAST or a room ID
+      rooms: new Map(),           // roomId -> { messages: [], unread: 0 }
+      broadcast: { messages: [], unread: 0 },
+    };
+
+    // --- DOM refs ----------------------------------------------
+    const el = {
+      statusPill:   document.getElementById("statusPill"),
+      statusText:   document.getElementById("statusText"),
+      userAvatar:   document.getElementById("userAvatar"),
+      userId:       document.getElementById("userId"),
+      channelsList: document.getElementById("channelsList"),
+      roomsList:    document.getElementById("roomsList"),
+      roomsCount:   document.getElementById("roomsCount"),
+      joinForm:     document.getElementById("joinForm"),
+      joinRoomInput:document.getElementById("joinRoomInput"),
+      chatIcon:     document.getElementById("chatIcon"),
+      chatTitle:    document.getElementById("chatTitle"),
+      chatSubtitle: document.getElementById("chatSubtitle"),
+      messages:     document.getElementById("messages"),
+      messagesEmpty:document.getElementById("messagesEmpty"),
+      composerInput:document.getElementById("composerInput"),
+      sendBtn:      document.getElementById("sendBtn"),
+      toastStack:   document.getElementById("toastStack"),
+    };
+
+    // ============================================================
+    // Utilities
+    // ============================================================
+
+    function setStatus(stateKey, text) {
+      el.statusPill.dataset.state = stateKey;
+      el.statusText.textContent = text;
+    }
+
+    function toast(message, kind = "info", ttl = 3200) {
+      const div = document.createElement("div");
+      div.className = `toast toast--${kind}`;
+      div.textContent = message;
+      el.toastStack.appendChild(div);
+      setTimeout(() => {
+        div.style.transition = "opacity 200ms ease, transform 200ms ease";
+        div.style.opacity = "0";
+        div.style.transform = "translateX(20px)";
+        setTimeout(() => div.remove(), 220);
+      }, ttl);
+    }
+
+    function timeNow() {
+      const d = new Date();
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    // Deterministic avatar color from an id
+    function colorFor(id) {
+      let h = 0;
+      for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+      const hue = h % 360;
+      return `linear-gradient(135deg, hsl(${hue} 70% 55%), hsl(${(hue + 40) % 360} 75% 45%))`;
+    }
+
+    function avatarInitials(id) {
+      if (!id) return "?";
+      return id.slice(0, 2).toUpperCase();
+    }
+
+    function getChannel(channelId) {
+      if (channelId === BROADCAST) return state.broadcast;
+      return state.rooms.get(channelId);
+    }
+
+    // ============================================================
+    // Rendering
+    // ============================================================
+
+    function renderChannels() {
+      // Update active state on broadcast
+      const bcast = el.channelsList.querySelector('[data-channel="__broadcast__"]');
+      bcast.classList.toggle("is-active", state.activeChannel === BROADCAST);
+      // Update broadcast badge
+      let bcastBadge = bcast.querySelector(".channel-item__badge");
+      const bcastUnread = state.activeChannel === BROADCAST ? 0 : state.broadcast.unread;
+      if (bcastUnread > 0) {
+        if (!bcastBadge) {
+          bcastBadge = document.createElement("div");
+          bcastBadge.className = "channel-item__badge";
+          bcast.appendChild(bcastBadge);
+        }
+        bcastBadge.textContent = bcastUnread > 99 ? "99+" : bcastUnread;
+      } else if (bcastBadge) {
+        bcastBadge.remove();
+      }
+
+      // Rebuild rooms list
+      el.roomsList.innerHTML = "";
+      el.roomsCount.textContent = state.rooms.size;
+
+      for (const [roomId, room] of state.rooms) {
+        const li = document.createElement("li");
+        li.className = "channel-item";
+        if (state.activeChannel === roomId) li.classList.add("is-active");
+        li.dataset.channel = roomId;
+
+        const icon = document.createElement("div");
+        icon.className = "channel-item__icon";
+        icon.textContent = "#";
+        li.appendChild(icon);
+
+        const name = document.createElement("div");
+        name.className = "channel-item__name";
+        name.textContent = roomId;
+        li.appendChild(name);
+
+        if (room.unread > 0 && state.activeChannel !== roomId) {
+          const badge = document.createElement("div");
+          badge.className = "channel-item__badge";
+          badge.textContent = room.unread > 99 ? "99+" : room.unread;
+          li.appendChild(badge);
+        }
+
+        const leaveBtn = document.createElement("button");
+        leaveBtn.className = "channel-item__leave";
+        leaveBtn.title = "Leave room";
+        leaveBtn.setAttribute("aria-label", `Leave room ${roomId}`);
+        leaveBtn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>`;
+        leaveBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          leaveRoom(roomId);
+        });
+        li.appendChild(leaveBtn);
+
+        li.addEventListener("click", () => switchChannel(roomId));
+        el.roomsList.appendChild(li);
+      }
+    }
+
+    function renderHeader() {
+      if (state.activeChannel === BROADCAST) {
+        el.chatIcon.textContent = "📣";
+        el.chatTitle.textContent = "Broadcast";
+        el.chatSubtitle.textContent = "Messages here are sent to every connected client";
+      } else {
+        el.chatIcon.textContent = "#";
+        el.chatTitle.textContent = state.activeChannel;
+        el.chatSubtitle.textContent = "Only members of this room will see your messages";
+      }
+    }
+
+    function renderMessages() {
+      const channel = getChannel(state.activeChannel);
+      el.messages.innerHTML = "";
+
+      if (!channel || channel.messages.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "messages__empty";
+        empty.innerHTML = `
+          <div class="messages__empty-icon">${state.activeChannel === BROADCAST ? "📢" : "💬"}</div>
+          <h3>No messages yet</h3>
+          <p>${state.activeChannel === BROADCAST
+            ? "Broadcast messages reach every connected client."
+            : "You're alone in this room. Say something to break the ice!"}</p>
+        `;
+        el.messages.appendChild(empty);
+        return;
+      }
+
+      for (const msg of channel.messages) {
+        el.messages.appendChild(renderBubble(msg));
+      }
+      // Scroll to bottom
+      requestAnimationFrame(() => {
+        el.messages.scrollTop = el.messages.scrollHeight;
+      });
+    }
+
+    function renderBubble(msg) {
+      const wrap = document.createElement("div");
+      wrap.className = "message";
+
+      if (msg.kind === "system") {
+        wrap.classList.add("message--system");
+        const bubble = document.createElement("div");
+        bubble.className = "message__bubble";
+        bubble.textContent = msg.text;
+        wrap.appendChild(bubble);
+        return wrap;
+      }
+
+      const isMe = msg.senderId === state.myId;
+      if (isMe) wrap.classList.add("message--me");
+
+      const avatar = document.createElement("div");
+      avatar.className = "message__avatar";
+      avatar.textContent = avatarInitials(msg.senderId);
+      avatar.style.background = colorFor(msg.senderId || "unknown");
+      wrap.appendChild(avatar);
+
+      const body = document.createElement("div");
+      body.className = "message__body";
+
+      const meta = document.createElement("div");
+      meta.className = "message__meta";
+      const senderEl = document.createElement("span");
+      senderEl.className = "message__sender";
+      senderEl.textContent = isMe ? "You" : msg.senderId;
+      const timeEl = document.createElement("span");
+      timeEl.textContent = msg.time;
+      meta.appendChild(senderEl);
+      meta.appendChild(timeEl);
+      body.appendChild(meta);
+
+      const bubble = document.createElement("div");
+      bubble.className = "message__bubble";
+      bubble.textContent = typeof msg.text === "string" ? msg.text : JSON.stringify(msg.text);
+      body.appendChild(bubble);
+
+      wrap.appendChild(body);
+      return wrap;
+    }
+
+    // ============================================================
+    // Actions
+    // ============================================================
+
+    function switchChannel(channelId) {
+      state.activeChannel = channelId;
+      const ch = getChannel(channelId);
+      if (ch) ch.unread = 0;
+      renderChannels();
+      renderHeader();
+      renderMessages();
+      el.composerInput.focus();
+    }
+
+    function pushMessage(channelId, msg) {
+      const ch = getChannel(channelId);
+      if (!ch) return;
+      ch.messages.push(msg);
+
+      if (state.activeChannel === channelId) {
+        // Append efficiently instead of full re-render
+        // Clear empty-state if present
+        const empty = el.messages.querySelector(".messages__empty");
+        if (empty) empty.remove();
+        el.messages.appendChild(renderBubble(msg));
+        requestAnimationFrame(() => {
+          el.messages.scrollTop = el.messages.scrollHeight;
+        });
+      } else if (msg.kind !== "system") {
+        ch.unread += 1;
+        renderChannels();
+      }
+    }
+
+    function joinRoom(roomId) {
+      roomId = roomId.trim();
+      if (!roomId) return;
+      if (state.rooms.has(roomId)) {
+        switchChannel(roomId);
+        return;
+      }
+      if (!isOpen()) {
+        toast("Not connected — cannot join room", "error");
+        return;
+      }
+      send({ type: "join-room", roomId });
+      state.rooms.set(roomId, { messages: [], unread: 0 });
+      pushMessage(roomId, {
+        kind: "system",
+        text: `You joined #${roomId}`,
+        time: timeNow(),
+      });
+      switchChannel(roomId);
+      toast(`Joined #${roomId}`, "success");
+    }
+
+    function leaveRoom(roomId) {
+      if (!state.rooms.has(roomId)) return;
+      if (isOpen()) send({ type: "leave-room", roomId });
+      state.rooms.delete(roomId);
+      if (state.activeChannel === roomId) {
+        switchChannel(BROADCAST);
+      } else {
+        renderChannels();
+      }
+      toast(`Left #${roomId}`, "info");
+    }
+
+    function sendCurrentMessage() {
+      const text = el.composerInput.value.trim();
+      if (!text) return;
+      if (!isOpen()) {
+        toast("Not connected", "error");
+        return;
+      }
+
+      if (state.activeChannel === BROADCAST) {
+        send({ type: "broadcast", data: text });
+        pushMessage(BROADCAST, {
+          kind: "chat",
+          senderId: state.myId,
+          text,
+          time: timeNow(),
+        });
+      } else {
+        const roomId = state.activeChannel;
+        send({ type: "room-message", roomId, data: text });
+        pushMessage(roomId, {
+          kind: "chat",
+          senderId: state.myId,
+          text,
+          time: timeNow(),
+        });
+      }
+
+      el.composerInput.value = "";
+      autoresize();
+      el.sendBtn.disabled = true;
+    }
+
+    // ============================================================
+    // WebSocket
+    // ============================================================
+
+    function isOpen() {
+      return state.ws && state.ws.readyState === WebSocket.OPEN;
+    }
+
+    function send(obj) {
+      try {
+        state.ws.send(JSON.stringify(obj));
+      } catch (err) {
+        toast("Send failed: " + err.message, "error");
+      }
+    }
+
+    function connect() {
+      setStatus("connecting", "connecting…");
+      let ws;
+      try {
+        ws = new WebSocket(WS_URL);
+      } catch (err) {
+        setStatus("disconnected", "failed");
+        toast("WebSocket error: " + err.message, "error");
+        return;
+      }
+      state.ws = ws;
+
+      ws.onopen = () => {
+        setStatus("connected", "connected");
+        // Server doesn't announce IDs; we'll derive ours from the first
+        // echo we get back, and until then show a placeholder.
+        // Users can still chat; own messages show as "You".
+        if (!state.myId) {
+          // Give a temporary local id — will be replaced when server sends one.
+          state.myId = "me-" + Math.random().toString(16).slice(2, 7);
+          el.userId.textContent = state.myId + " (local)";
+          el.userAvatar.textContent = avatarInitials(state.myId);
+          el.userAvatar.style.background = colorFor(state.myId);
+        }
+        toast("Connected to server", "success", 1800);
+      };
+
+      ws.onclose = () => {
+        setStatus("disconnected", "disconnected");
+        toast("Disconnected — retrying in 3s…", "error", 2500);
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        // onclose will follow; keep quiet to avoid duplicate toasts
+      };
+
+      ws.onmessage = (e) => {
+        let msg;
+        try {
+          msg = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+        handleServerMessage(msg);
+      };
+    }
+
+    function handleServerMessage(msg) {
+      // msg: { type, senderID, roomId, data }
+      const senderId = msg.senderID || "unknown";
+      const time = timeNow();
+
+      switch (msg.type) {
+        case "broadcast":
+          pushMessage(BROADCAST, {
+            kind: "chat",
+            senderId,
+            text: msg.data ?? "",
+            time,
+          });
+          break;
+
+        case "room-message": {
+          const roomId = msg.roomId;
+          if (!roomId) return;
+          if (!state.rooms.has(roomId)) {
+            // Shouldn't happen (server only forwards to members), but be safe
+            state.rooms.set(roomId, { messages: [], unread: 0 });
+            renderChannels();
+          }
+          pushMessage(roomId, {
+            kind: "chat",
+            senderId,
+            text: msg.data ?? "",
+            time,
+          });
+          break;
+        }
+
+        case "join-room":
+        case "leave-room": {
+          // The server does not currently broadcast join/leave events to
+          // other clients, but if it ever does, surface them as system msgs.
+          const roomId = msg.roomId;
+          if (roomId && state.rooms.has(roomId)) {
+            pushMessage(roomId, {
+              kind: "system",
+              text: `${senderId} ${msg.type === "join-room" ? "joined" : "left"} #${roomId}`,
+              time,
+            });
+          }
+          break;
+        }
+
+        default:
+          // Unknown — ignore silently
+          break;
+      }
+    }
+
+    // ============================================================
+    // Composer behavior
+    // ============================================================
+
+    function autoresize() {
+      const t = el.composerInput;
+      t.style.height = "auto";
+      t.style.height = Math.min(t.scrollHeight, 140) + "px";
+    }
+
+    el.composerInput.addEventListener("input", () => {
+      autoresize();
+      el.sendBtn.disabled = el.composerInput.value.trim().length === 0;
+    });
+
+    el.composerInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendCurrentMessage();
+      }
+    });
+
+    el.sendBtn.addEventListener("click", sendCurrentMessage);
+
+    // Broadcast channel click
+    el.channelsList
+      .querySelector('[data-channel="__broadcast__"]')
+      .addEventListener("click", () => switchChannel(BROADCAST));
+
+    // Join form
+    el.joinForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      joinRoom(el.joinRoomInput.value);
+      el.joinRoomInput.value = "";
+    });
+
+    // ============================================================
+    // Boot
+    // ============================================================
+
+    renderChannels();
+    renderHeader();
+    renderMessages();
+    connect();
+    el.composerInput.focus();
+  </script>
+</body>
+</html>
